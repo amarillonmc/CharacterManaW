@@ -25,7 +25,7 @@ await library.ensureDirs();
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', false);
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '16mb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
@@ -357,6 +357,7 @@ app.post('/api/llm/prompt', async (req, res, next) => {
       target: req.body?.target,
       language: req.body?.language,
       description,
+      image: req.body?.image,
       state,
       template: template.public,
     });
@@ -449,7 +450,7 @@ function safeFilename(name) {
 function statusForError(err) {
   if (err instanceof TemplateError) return err.code === 'not_found' ? 404 : 400;
   if (err instanceof RenderError) return 400;
-  if (err instanceof LlmError) return err.code === 'missing_key' ? 400 : 502;
+  if (err instanceof LlmError) return ['missing_key', 'invalid_image', 'invalid_base_url'].includes(err.code) ? 400 : 502;
   if (err instanceof HttpError) return err.status;
   if (err?.name === 'MulterError') return 400;
   return 500;

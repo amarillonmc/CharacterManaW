@@ -278,13 +278,19 @@
               <textarea id="llmDescription" rows="4" data-i18n-placeholder="descriptionPlaceholder" placeholder="例: 夜の図書館で本を読む、柔らかい照明、全身"></textarea>
             </label>
           </div>
+          <div class="preview-ref">
+            <div class="preview-ref-thumb"><img id="llmPreviewImg" alt=""></div>
+            <div class="preview-ref-copy">
+              <label class="check-row"><input type="checkbox" id="llmUsePreview" disabled> <span data-i18n="usePreviewImage">Use the current preview as a visual reference</span></label>
+              <p class="muted small" data-i18n="usePreviewHint">The current preview PNG is sent to your chosen LLM provider. Use a model that accepts image input.</p>
+              <p class="muted small" id="llmPreviewStatus"></p>
+            </div>
+          </div>
           <div class="option-row">
             <label class="check-row"><input type="checkbox" id="llmRememberKey"> <span data-i18n="rememberKey">このタブにキーを記憶</span></label>
             <label class="field compact"><span data-i18n="temperature">Temperature</span><input type="number" id="llmTemperature" min="0" max="2" step="0.1" value="0.7"></label>
             <label class="field compact"><span data-i18n="maxTokens">Max tokens</span><input type="number" id="llmMaxTokens" min="128" max="8192" step="64" value="900"></label>
           </div>
-          <button class="btn primary" id="llmGenerate" data-i18n="generatePrompt">プロンプトを生成</button>
-          <p class="muted small" id="llmStatus"></p>
         </div>
         <div class="prompt-result">
           <h3 data-i18n="result">結果</h3>
@@ -300,7 +306,9 @@
         </div>
       </div>
       <footer class="modal-foot">
+        <p class="muted small" id="llmStatus"></p>
         <button class="btn ghost" id="promptCancel" data-i18n="close">閉じる</button>
+        <button class="btn primary" id="llmGenerate" data-i18n="generatePrompt">プロンプトを生成</button>
       </footer>
     </div>
   </dialog>

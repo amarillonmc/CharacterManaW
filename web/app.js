@@ -29,6 +29,9 @@ const state = {
   pickedFiles: [],
   importing: false,
   templateRequest: 0,
+  promptImage: null,
+  promptImageStatus: '',
+  promptImageRequest: 0,
 };
 
 const els = {};
@@ -73,6 +76,7 @@ function cacheEls() {
     'promptDialog', 'promptClose', 'promptCancel', 'llmProvider', 'llmModel', 'llmBaseUrl', 'llmApiKey',
     'llmTarget', 'llmLanguage', 'llmDescription', 'llmRememberKey', 'llmTemperature', 'llmMaxTokens',
     'llmGenerate', 'llmStatus', 'llmPromptOut', 'llmNegativeOut', 'llmTagsOut', 'llmNotesOut', 'llmDownload',
+    'llmUsePreview', 'llmPreviewImg', 'llmPreviewStatus',
     'importDialog', 'importClose', 'importCancel', 'pickFolderBtn', 'uploadFolderBtn', 'pickedFolderInfo',
     'importPath', 'importId', 'importPathBtn', 'importStatus', 'deleteTemplateBtn', 'importFolderPane', 'importPathPane',
     'infoDialog', 'infoClose', 'infoClose2', 'infoMeta', 'infoReadme', 'creditsText', 'creditsBtn',
@@ -191,6 +195,12 @@ function bindStaticEvents() {
 
   els.promptClose.addEventListener('click', () => els.promptDialog.close());
   els.promptCancel.addEventListener('click', () => els.promptDialog.close());
+  els.promptDialog.addEventListener('close', () => {
+    state.promptImageRequest++;
+    state.promptImage = null;
+    state.promptImageStatus = '';
+    els.llmPreviewImg.removeAttribute('src');
+  });
   els.llmProvider.addEventListener('change', () => setProviderDefaults(true));
   els.llmGenerate.addEventListener('click', generatePrompt);
   els.llmDownload.addEventListener('click', downloadPromptJson);
@@ -243,6 +253,7 @@ function switchLanguage(lang) {
   buildVariantAxes();
   buildVariantValues();
   updateVariantInfo();
+  updatePromptPreviewStatus();
   if (state.previewUrl) els.previewImage.alt = t(lang, 'preview');
 }
 
@@ -1461,6 +1472,83 @@ function openPromptDialog() {
   els.llmTagsOut.value = '';
   els.llmNotesOut.textContent = '';
   els.promptDialog.showModal();
+  preparePromptPreview();
+}
+
+async function preparePromptPreview() {
+  const requestId = ++state.promptImageRequest;
+  state.promptImage = null;
+  state.promptImageStatus = 'preparing';
+  els.llmPreviewImg.removeAttribute('src');
+  els.llmUsePreview.checked = false;
+  els.llmUsePreview.disabled = true;
+  els.llmGenerate.disabled = true;
+  updatePromptPreviewStatus();
+  try {
+    const res = await fetch('/api/render', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ templateId: state.template.id, state: state.current, mode: 'normal' }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await downscalePromptImage(await res.blob(), 1024);
+    const dataUrl = await blobToDataUrl(blob);
+    if (requestId !== state.promptImageRequest) return;
+    state.promptImage = { dataUrl, blob };
+    state.promptImageStatus = 'attached';
+    els.llmPreviewImg.src = dataUrl;
+    els.llmUsePreview.disabled = false;
+    els.llmUsePreview.checked = true;
+    els.llmGenerate.disabled = false;
+    updatePromptPreviewStatus();
+  } catch {
+    if (requestId !== state.promptImageRequest) return;
+    state.promptImageStatus = 'unavailable';
+    els.llmGenerate.disabled = false;
+    updatePromptPreviewStatus();
+  }
+}
+
+function updatePromptPreviewStatus() {
+  const keys = { preparing: 'previewPreparing', attached: 'previewAttached', unavailable: 'previewUnavailable' };
+  els.llmPreviewStatus.textContent = keys[state.promptImageStatus] ? t(state.lang, keys[state.promptImageStatus]) : '';
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error || new Error('read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function downscalePromptImage(blob, maxSide) {
+  if (typeof createImageBitmap !== 'function') return blob;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    if (scale >= 1) {
+      bitmap.close?.();
+      return blob;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close?.();
+      return blob;
+    }
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+    const resized = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    return resized || blob;
+  } catch {
+    bitmap?.close?.();
+    return blob;
+  }
 }
 
 function setProviderDefaults(force) {
@@ -1471,8 +1559,15 @@ function setProviderDefaults(force) {
 }
 
 async function generatePrompt() {
+  if (state.promptImageStatus === 'preparing') {
+    return showToast(t(state.lang, 'previewNotReady'), 'error');
+  }
   const apiKey = els.llmApiKey.value.trim();
   if (!apiKey) return showToast(t(state.lang, 'promptMissingKey'), 'error');
+  const usePreviewImage = els.llmUsePreview.checked;
+  if (usePreviewImage && !state.promptImage?.dataUrl) {
+    return showToast(t(state.lang, 'previewNotReady'), 'error');
+  }
   if (els.llmRememberKey.checked) sessionStorage.setItem('cnw:llmKey', apiKey);
   else sessionStorage.removeItem('cnw:llmKey');
   state.llm = {
@@ -1502,13 +1597,14 @@ async function generatePrompt() {
         target: state.llm.target,
         language: state.llm.promptLanguage,
         description: els.llmDescription.value,
+        image: usePreviewImage ? state.promptImage.dataUrl : undefined,
       }),
     });
     els.llmPromptOut.value = res.prompt || '';
     els.llmNegativeOut.value = res.negative_prompt || '';
     els.llmTagsOut.value = Array.isArray(res.tags) ? res.tags.join(', ') : '';
     els.llmNotesOut.textContent = res.notes || '';
-    els.llmStatus.textContent = `${t(state.lang, 'promptDone')} · ${res.provider}/${res.model} · ${res.latencyMs} ms`;
+    els.llmStatus.textContent = `${t(state.lang, 'promptDone')} · ${res.provider}/${res.model}${res.usedReferenceImage ? ` · ${t(state.lang, 'promptImageUsed')}` : ''} · ${res.latencyMs} ms`;
   } catch (err) {
     els.llmStatus.textContent = err.message;
     showToast(`${t(state.lang, 'promptError')}: ${err.message}`, 'error');
@@ -1524,6 +1620,7 @@ function downloadPromptJson() {
     tags: els.llmTagsOut.value.split(',').map((s) => s.trim()).filter(Boolean),
     notes: els.llmNotesOut.textContent,
     target: els.llmTarget.value,
+    usedReferenceImage: els.llmUsePreview.checked && !!state.promptImage,
     generatedAt: new Date().toISOString(),
   };
   downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'prompt.json');

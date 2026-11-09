@@ -46,10 +46,17 @@ export async function generatePrompt(input = {}) {
   const temperature = clampNumber(input.temperature, 0, 2, 0.7);
   const maxTokens = clampNumber(input.maxTokens, 128, 8192, 900);
   const language = ['ja', 'zh', 'en'].includes(input.language) ? input.language : 'en';
-  const context = buildPromptContext(input, { targetKey, target, language });
+  const image = parseImageDataUrl(input.image);
+  const context = buildPromptContext(input, { targetKey, target, language, hasImage: !!image });
+  const userContent = image
+    ? [
+        { type: 'text', text: context.user },
+        { type: 'image', mimeType: image.mimeType, data: image.data },
+      ]
+    : context.user;
   const messages = [
     { role: 'system', content: context.system },
-    { role: 'user', content: context.user },
+    { role: 'user', content: userContent },
   ];
   const started = Date.now();
   let text;
@@ -67,11 +74,12 @@ export async function generatePrompt(input = {}) {
     model,
     target: targetKey,
     targetLabel: target.label,
+    usedReferenceImage: !!image,
     latencyMs: Date.now() - started,
   };
 }
 
-export function buildPromptContext(input, { targetKey, target, language }) {
+export function buildPromptContext(input, { targetKey, target, language, hasImage = false }) {
   const s = input.state || {};
   const template = input.template || {};
   const colors = normalizeColors(s.colors || {});
@@ -105,16 +113,29 @@ Rules:
 - Do not invent copyrighted characters or artists unless the user explicitly asks.
 - ${target.negative ? 'Provide a useful negative_prompt.' : 'Use an empty negative_prompt and put constraints in prompt.'}
 - Keep the prompt self-contained and ready to paste into the target model.
-- If the user's description is empty, describe a neutral full-body character-sheet presentation on a simple background.`;
-  const user = `Character component data:\n${lines.join('\n')}\n\nUser request:\n${userDescription || '(none; create a neutral character-sheet prompt)'}`;
+- If the user's description is empty, describe a neutral full-body character-sheet presentation on a simple background.${hasImage ? `
+- A rendered preview image of the current character is attached. Inspect it and make the prompt faithful to the visible character (hair shape, eyes, face, outfit, accessories, colors).
+- Use the component data to resolve exact names and color names, but let the attached image decide what is actually visible.
+- Do not mention the screenshot, the attachment, the editor, or that a preview was provided.` : ''}`;
+  const user = `Character component data:\n${lines.join('\n')}\n\nUser request:\n${userDescription || '(none; create a neutral character-sheet prompt)'}${hasImage ? '\n\nA rendered preview of the current character is attached. Use it as the primary visual reference and derive the prompt from what is visible in the image.' : ''}`;
   return { system, user };
 }
 
 async function callOpenAICompatible({ baseUrl, apiKey, model, temperature, maxTokens, messages }) {
   const url = joinUrl(baseUrl, '/chat/completions');
+  const apiMessages = messages.map((m) => ({
+    role: m.role,
+    content: Array.isArray(m.content)
+      ? m.content.map((part) =>
+          part.type === 'text'
+            ? { type: 'text', text: part.text }
+            : { type: 'image_url', image_url: { url: `data:${part.mimeType};base64,${part.data}` } },
+        )
+      : m.content,
+  }));
   const body = {
     model,
-    messages,
+    messages: apiMessages,
     temperature,
     max_tokens: maxTokens,
     stream: false,
@@ -138,7 +159,19 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, temperature, maxTo
 async function callAnthropic({ baseUrl, apiKey, model, temperature, maxTokens, messages }) {
   const url = joinUrl(baseUrl, '/v1/messages');
   const system = messages.find((m) => m.role === 'system')?.content ?? '';
-  const userMessages = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
+  const userMessages = messages.filter((m) => m.role !== 'system').map((m) => ({
+    role: m.role,
+    content: Array.isArray(m.content)
+      ? m.content.map((part) =>
+          part.type === 'text'
+            ? { type: 'text', text: part.text }
+            : {
+                type: 'image',
+                source: { type: 'base64', media_type: part.mimeType, data: part.data },
+              },
+        )
+      : m.content,
+  }));
   const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
@@ -158,13 +191,23 @@ async function callAnthropic({ baseUrl, apiKey, model, temperature, maxTokens, m
 async function callGemini({ baseUrl, apiKey, model, temperature, maxTokens, messages }) {
   const url = `${joinUrl(baseUrl, `/models/${encodeURIComponent(model)}:generateContent`)}?key=${encodeURIComponent(apiKey)}`;
   const system = messages.find((m) => m.role === 'system')?.content ?? '';
-  const user = messages.filter((m) => m.role !== 'system').map((m) => m.content).join('\n');
+  const requestParts = [];
+  for (const m of messages.filter((x) => x.role !== 'system')) {
+    if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (part.type === 'text') requestParts.push({ text: part.text });
+        else requestParts.push({ inline_data: { mime_type: part.mimeType, data: part.data } });
+      }
+    } else {
+      requestParts.push({ text: m.content });
+    }
+  }
   const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: 'user', parts: [{ text: user }] }],
+      contents: [{ role: 'user', parts: requestParts }],
       generationConfig: { temperature, maxOutputTokens: maxTokens },
     }),
   }, 120000);
@@ -202,6 +245,29 @@ function parsePromptResponse(text) {
     tags: Array.isArray(obj.tags) ? obj.tags.map(String).slice(0, 80) : [],
     notes: String(obj.notes ?? '').trim(),
   };
+}
+
+const MAX_REFERENCE_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export function parseImageDataUrl(value) {
+  if (value == null || value === '') return null;
+  const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(String(value).trim());
+  if (!match) {
+    throw new LlmError('Reference image must be a PNG, JPEG, or WebP data URL.', 'invalid_image');
+  }
+  const mimeType = match[1].toLowerCase();
+  const data = match[2].replace(/\s+/g, '');
+  const bytes = Buffer.from(data, 'base64');
+  if (!bytes.length) throw new LlmError('Reference image is empty.', 'invalid_image');
+  if (bytes.length > MAX_REFERENCE_IMAGE_BYTES) {
+    throw new LlmError('Reference image is too large (max 8 MB).', 'invalid_image');
+  }
+  const isPng = bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  const isWebp = bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP';
+  const magicOk = (mimeType === 'image/png' && isPng) || (mimeType === 'image/jpeg' && isJpeg) || (mimeType === 'image/webp' && isWebp);
+  if (!magicOk) throw new LlmError('Reference image bytes do not match the declared image type.', 'invalid_image');
+  return { mimeType, data, bytes: bytes.length };
 }
 
 function normalizeProvider(p) {
