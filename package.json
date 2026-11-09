@@ -1,0 +1,24 @@
+{
+  "name": "character-nantoka-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-based port of キャラクターなんとか機 (Character Nantoka Ki) with template compatibility, variant export and BYOK prompt studio.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node test/run.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.21.2",
+    "iconv-lite": "^0.6.3",
+    "multer": "^2.5.0",
+    "pngjs": "^7.0.0",
+    "sharp": "^0.34.5"
+  }
+}
